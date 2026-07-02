@@ -1,0 +1,11 @@
+node_modules/
+.wrangler/
+.dev.vars
+.env
+token
+dh_creds
+dh_user
+dh_pass
+accounts.txt
+.d1_id
+*.log

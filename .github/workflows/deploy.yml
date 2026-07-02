@@ -1,0 +1,49 @@
+# 自动部署 Cloudflare Worker
+#
+# 前置（GitHub 仓库设置一次）：
+#   Settings → Secrets and variables → Actions → New repository secret
+#     名称：CLOUDFLARE_API_TOKEN   值：你的 Cloudflare API Token（需 Workers Scripts:Edit + D1:Edit）
+#
+# 触发：push 到 main（仅 src/wrangler/package 变更）或手动 workflow_dispatch。
+# 说明：Worker secrets（DH_*/PROXY_TOKEN_KEY/ACCESS_KEY）与 D1 绑定持久存在 Cloudflare，
+#       本流程只部署代码，无需在 CI 里重设密钥。
+
+name: Deploy Worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'wrangler.jsonc'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Deploy to Cloudflare
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

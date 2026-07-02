@@ -1,0 +1,15 @@
+{
+  // Cloudflare Worker 配置：Docker Hub pull-only 反向代理
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "docker-hub-proxy",
+  "main": "src/index.js",
+  "compatibility_date": "2025-07-01",
+  "compatibility_flags": [],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "docker-hub-accounts",
+      "database_id": "4f61b564-17fa-4cea-88e7-87fb08c6de7b"
+    }
+  ]
+}
