@@ -20,6 +20,7 @@ const REGISTRY_HOST = 'registry-1.docker.io';
 const AUTH_HOST = 'auth.docker.io';
 const AUTH_SERVICE = 'registry.docker.io';
 const ALLOWED_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+const REDIRECT_PREFIX = 'redirect_to_'; // 上游 3xx 改写前缀：CDN 跳转改写回本代理，由本代理回源
 const PROXY_TOKEN_TTL = 3600; // proxy token 有效期（秒）
 const COOLDOWN_MS = 6 * 60 * 60 * 1000; // 账号触发 429 后冷却 6 小时
 
@@ -71,6 +72,11 @@ async function handleRequest(request, env) {
       status: 405,
       headers: { allow: 'GET, HEAD, OPTIONS', ...corsBase() },
     });
+  }
+
+  // CDN 回源：/redirect_to_<host>/<path> → 代理到 host（blob 跳转经此回源，客户端不直连 CDN）
+  if (url.pathname.startsWith('/' + REDIRECT_PREFIX)) {
+    return handleCdnRedirect(request, url, env);
   }
 
   if (url.pathname === '/token' || url.pathname.startsWith('/token/')) {
@@ -383,6 +389,59 @@ function jsonError(status, code, message, extra = {}) {
   });
 }
 
+// ===== 重定向改写（上游 CDN 跳转改写回本代理，由本代理回源；客户端不直连 CDN）=====
+
+/** 仅允许 Docker 自有域名回源（防 SSRF / 被当开放代理）*/
+function isAllowedUpstream(host) {
+  return host.endsWith('.docker.com') || host.endsWith('.docker.io');
+}
+
+/** 解析 /redirect_to_<host>/<path> */
+function parseRedirectPath(pathname) {
+  const m = pathname.match(/^\/redirect_to_([^/]+)(\/.*)$/);
+  if (!m) return null;
+  return { host: m[1], path: m[2] };
+}
+
+/** 把上游 Location 改写为 <代理>/redirect_to_<host><path>?<query> */
+function rewriteLocation(location, proxyOrigin) {
+  try {
+    const u = new URL(location);
+    if (!isAllowedUpstream(u.hostname)) return null;
+    return `${proxyOrigin}/${REDIRECT_PREFIX}${u.hostname}${u.pathname}${u.search}`;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** 处理 /redirect_to_<host>/...：回源到 host 并流式返回（blob 下载经此路径）*/
+async function handleCdnRedirect(request, url, env) {
+  const parsed = parseRedirectPath(url.pathname);
+  if (!parsed || !isAllowedUpstream(parsed.host)) {
+    return new Response('forbidden upstream', { status: 403, headers: corsBase() });
+  }
+  const upstream = `https://${parsed.host}${parsed.path}${url.search}`;
+  const headers = buildUpstreamHeaders(request);
+  let res;
+  try {
+    res = await fetch(upstream, { method: request.method, headers, redirect: 'manual' });
+  } catch (e) {
+    return new Response(`upstream error: ${e.message}`, { status: 502, headers: corsBase() });
+  }
+  const h = new Headers(res.headers);
+  stripRevealingHeaders(h);
+  // CDN 若再次跳转，继续改写
+  if ([301, 302, 303, 307, 308].includes(res.status)) {
+    const loc = h.get('location');
+    if (loc) {
+      const newLoc = rewriteLocation(loc, url.origin);
+      if (newLoc) h.set('location', newLoc);
+    }
+  }
+  applyCors(h);
+  return new Response(res.body, { status: res.status, headers: h });
+}
+
 /**
  * Docker Hub 官方镜像存放在 library/ 命名空间下。客户端拉 <domain>/nginx 不会自动补 library/，
  * 这里把单段镜像名改写为 /v2/library/<name>/...。多段名与已是 library/ 的不变。
@@ -415,6 +474,15 @@ function stripRevealingHeaders(headers) {
 function rewriteRegistryResponse(res, url) {
   const headers = new Headers(res.headers);
   stripRevealingHeaders(headers);
+
+  // 上游 3xx（如 blob 的 307 到 CDN）改写 Location，让客户端经本代理回源，而非直连 CDN
+  if ([301, 302, 303, 307, 308].includes(res.status)) {
+    const loc = headers.get('location');
+    if (loc) {
+      const newLoc = rewriteLocation(loc, url.origin);
+      if (newLoc) headers.set('location', newLoc);
+    }
+  }
 
   const wwwAuth = headers.get('www-authenticate');
   if (wwwAuth) {
@@ -490,6 +558,11 @@ function infoPage(host) {
   pre{background:#11182e;border:1px solid #233056;border-radius:10px;padding:14px 16px;overflow:auto;line-height:1.6}
   code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
   .tag{display:inline-block;background:#16336e;color:#9cc2ff;border-radius:999px;padding:2px 10px;font-size:.78rem;margin-bottom:1rem}
+  .star{display:inline-flex;align-items:center;gap:7px;background:#24292f;color:#fff;text-decoration:none;padding:8px 14px;border-radius:8px;font-size:.9rem;border:1px solid #3b424c;box-shadow:0 2px 8px rgba(0,0,0,.25);transition:transform .15s,background .15s}
+  .star:hover{background:#2f363d;transform:translateY(-1px)}
+  .star svg{fill:#facc15}
+  .hint{color:#9aa4bf;font-size:.82rem;margin:.6rem 0 1.4rem}
+  .hint a{color:#9cc2ff}
   small{color:#6b7493}
 </style>
 </head>
@@ -498,6 +571,11 @@ function infoPage(host) {
     <span class="tag">pull-only</span>
     <h1>Docker Hub Mirror</h1>
     <p class="sub">基于 Cloudflare Worker 的 Docker Hub 拉取反向代理。仅支持 <code>docker pull</code>。</p>
+    <a class="star" href="https://github.com/AinzRimuru/docker_proxy_cf" target="_blank" rel="noopener" aria-label="Star on GitHub">
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 .25a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8 8 0 0 0 8 .25z"/></svg>
+      Star on GitHub
+    </a>
+    <p class="hint">如果对你有帮助，欢迎到 <a href="https://github.com/AinzRimuru/docker_proxy_cf" target="_blank" rel="noopener">AinzRimuru/docker_proxy_cf</a> 点个 ⭐ Star 支持一下～</p>
     <pre><code>${examples}</code></pre>
     <p class="sub">也可作为 registry mirror 写入 daemon.json：</p>
     <pre><code>{
