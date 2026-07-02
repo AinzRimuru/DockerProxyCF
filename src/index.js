@@ -20,6 +20,7 @@ const REGISTRY_HOST = 'registry-1.docker.io';
 const AUTH_HOST = 'auth.docker.io';
 const AUTH_SERVICE = 'registry.docker.io';
 const ALLOWED_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+const REDIRECT_PREFIX = 'redirect_to_'; // 上游 3xx 改写前缀：CDN 跳转改写回本代理，由本代理回源
 const PROXY_TOKEN_TTL = 3600; // proxy token 有效期（秒）
 const COOLDOWN_MS = 6 * 60 * 60 * 1000; // 账号触发 429 后冷却 6 小时
 
@@ -71,6 +72,11 @@ async function handleRequest(request, env) {
       status: 405,
       headers: { allow: 'GET, HEAD, OPTIONS', ...corsBase() },
     });
+  }
+
+  // CDN 回源：/redirect_to_<host>/<path> → 代理到 host（blob 跳转经此回源，客户端不直连 CDN）
+  if (url.pathname.startsWith('/' + REDIRECT_PREFIX)) {
+    return handleCdnRedirect(request, url, env);
   }
 
   if (url.pathname === '/token' || url.pathname.startsWith('/token/')) {
@@ -383,6 +389,59 @@ function jsonError(status, code, message, extra = {}) {
   });
 }
 
+// ===== 重定向改写（上游 CDN 跳转改写回本代理，由本代理回源；客户端不直连 CDN）=====
+
+/** 仅允许 Docker 自有域名回源（防 SSRF / 被当开放代理）*/
+function isAllowedUpstream(host) {
+  return host.endsWith('.docker.com') || host.endsWith('.docker.io');
+}
+
+/** 解析 /redirect_to_<host>/<path> */
+function parseRedirectPath(pathname) {
+  const m = pathname.match(/^\/redirect_to_([^/]+)(\/.*)$/);
+  if (!m) return null;
+  return { host: m[1], path: m[2] };
+}
+
+/** 把上游 Location 改写为 <代理>/redirect_to_<host><path>?<query> */
+function rewriteLocation(location, proxyOrigin) {
+  try {
+    const u = new URL(location);
+    if (!isAllowedUpstream(u.hostname)) return null;
+    return `${proxyOrigin}/${REDIRECT_PREFIX}${u.hostname}${u.pathname}${u.search}`;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** 处理 /redirect_to_<host>/...：回源到 host 并流式返回（blob 下载经此路径）*/
+async function handleCdnRedirect(request, url, env) {
+  const parsed = parseRedirectPath(url.pathname);
+  if (!parsed || !isAllowedUpstream(parsed.host)) {
+    return new Response('forbidden upstream', { status: 403, headers: corsBase() });
+  }
+  const upstream = `https://${parsed.host}${parsed.path}${url.search}`;
+  const headers = buildUpstreamHeaders(request);
+  let res;
+  try {
+    res = await fetch(upstream, { method: request.method, headers, redirect: 'manual' });
+  } catch (e) {
+    return new Response(`upstream error: ${e.message}`, { status: 502, headers: corsBase() });
+  }
+  const h = new Headers(res.headers);
+  stripRevealingHeaders(h);
+  // CDN 若再次跳转，继续改写
+  if ([301, 302, 303, 307, 308].includes(res.status)) {
+    const loc = h.get('location');
+    if (loc) {
+      const newLoc = rewriteLocation(loc, url.origin);
+      if (newLoc) h.set('location', newLoc);
+    }
+  }
+  applyCors(h);
+  return new Response(res.body, { status: res.status, headers: h });
+}
+
 /**
  * Docker Hub 官方镜像存放在 library/ 命名空间下。客户端拉 <domain>/nginx 不会自动补 library/，
  * 这里把单段镜像名改写为 /v2/library/<name>/...。多段名与已是 library/ 的不变。
@@ -415,6 +474,15 @@ function stripRevealingHeaders(headers) {
 function rewriteRegistryResponse(res, url) {
   const headers = new Headers(res.headers);
   stripRevealingHeaders(headers);
+
+  // 上游 3xx（如 blob 的 307 到 CDN）改写 Location，让客户端经本代理回源，而非直连 CDN
+  if ([301, 302, 303, 307, 308].includes(res.status)) {
+    const loc = headers.get('location');
+    if (loc) {
+      const newLoc = rewriteLocation(loc, url.origin);
+      if (newLoc) headers.set('location', newLoc);
+    }
+  }
 
   const wwwAuth = headers.get('www-authenticate');
   if (wwwAuth) {
