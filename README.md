@@ -81,11 +81,11 @@ export CLOUDFLARE_API_TOKEN='你的CF令牌'
 
 ```bash
 # A) 仅 token 保护：任何人可拉取，但拿不到真实账号 token
-! ~/docker_proxy_cf/set-proxy-key.sh
+! ~/DockerProxyCF/set-proxy-key.sh
 
 # B) token 保护 + 访问控制：未知密码者无法拉取
-! ACCESS_KEY=你的访问密码 ~/docker_proxy_cf/set-proxy-key.sh
-! ~/docker_proxy_cf/deploy.sh
+! ACCESS_KEY=你的访问密码 ~/DockerProxyCF/set-proxy-key.sh
+! ~/DockerProxyCF/deploy.sh
 ```
 
 启用后 `docker pull <你的域名>/alpine` 仍无需手动 login（客户端自动完成鉴权流程）。若设了 `ACCESS_KEY`，则需先：
@@ -102,18 +102,18 @@ docker login <你的域名> -u任意用户名 -p<ACCESS_KEY>
 
 **创建 D1 + 建表（一次性）：**
 ```bash
-! ~/docker_proxy_cf/d1-setup.sh   # 创建库 docker-hub-accounts + accounts 表，输出 database_id
+! ~/DockerProxyCF/d1-setup.sh   # 创建库 docker-hub-accounts + accounts 表，输出 database_id
 ```
 需把返回的 `database_id` 填入 `wrangler.jsonc` 的 `d1_databases` 绑定（binding 名为 `DB`）。
 
 **录入账号**（`accounts.txt` 每行 `用户名:密码`，`#` 为注释；密码建议用 Docker Hub Access Token）：
 ```bash
-! ~/docker_proxy_cf/insert-accounts.sh
+! ~/DockerProxyCF/insert-accounts.sh
 ```
 
 **accounts 表：** `username`、`password`、`enabled`(0/1)、`rate_limited_until`(ms 时间戳，0=可用)、`last_used`、`limited_count`(被 429 次数)。
 
-> D1 有账号则用账号池；D1 为空或查询失败时自动回退单账号。冷却逻辑可隔离验证：`! ~/docker_proxy_cf/verify-cooldown.sh`。
+> D1 有账号则用账号池；D1 为空或查询失败时自动回退单账号。冷却逻辑可隔离验证：`! ~/DockerProxyCF/verify-cooldown.sh`。
 
 ## 客户端使用
 
