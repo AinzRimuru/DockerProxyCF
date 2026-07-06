@@ -13,13 +13,14 @@ docker client ──► 你的 Worker 域名
                      ├─ /token?...              ──►  auth.docker.io       （获取拉取 token）
                      └─ /v2/...blobs/<digest>   ──►  registry-1.docker.io 返回 307
                                                        ↓
-                                          透传 307 给客户端，由客户端直连 CDN 下载大层
+                                          改写 Location 为 /redirect_to_<cdn>/...
+                                          由 Worker 统一回源 CDN 下载大层
 ```
 
 关键设计：
 
 - **透明转发 + 仅改写 auth realm**。把 401 响应里 `WWW-Authenticate` 的 `realm` 指回 Worker 的 `/token`，客户端的 token 获取流程自然走代理。客户端拿到的是 `auth.docker.io` 签发的真 token，对 `registry-1.docker.io` 直接有效——无需在 Worker 内签发/缓存 token，匿名与带认证拉取都兼容。
-- **blob 下载透传 307**。registry 会把 blob 请求 307 到 CDN（`production.cloudfront.docker.com`）。Worker 不跟随，直接把 307 返回客户端，大文件由客户端直连 CDN 下载——既不占用 Worker 子请求/流量，也避开 registry 端的拉取计数。
+- **blob 下载改写回源**。registry 会把 blob 请求 307 到 CDN（`production.cloudfront.docker.com`）。Worker 不让客户端直连 CDN，而是把 307 的 `Location` 改写回 `/redirect_to_<cdn-host>/...`，由 Worker 自己回源 CDN 并流式返回——所有流量只经过单一代理域名，无需为 CDN 域名单独配置。
 - **自动补 `library/`**。`docker pull <域名>/nginx` 会被改写为 `library/nginx`，与官方镜像命名空间一致。
 - **仅 pull**。只放行 `GET/HEAD/OPTIONS`，其它方法返回 `405`。
 
@@ -161,4 +162,4 @@ docker pull <你的域名>/alpine
 - **仅 pull**：所有写操作（push/delete 等）返回 `405`。
 - **匿名限流**：匿名拉取受 Docker Hub 速率限制（100/h），且 Worker 出口 IP 共享，极易 `429`。**已配置账号鉴权即不受此限**（见上文「启用账号鉴权」），客户端也无需 `docker login`。
 - **上游固定为 `registry-1.docker.io`**，仅代理 Docker Hub，不代理其它 registry。
-- blob 走 CDN 直连，manifest/token 走 Worker；Worker Free 计划每次请求子请求上限（50）对单次 pull 足够。
+- blob 改写回源经 Worker 转发，manifest/token 走 Worker；Worker Free 计划每次请求子请求上限（50）对单次 pull 足够。
