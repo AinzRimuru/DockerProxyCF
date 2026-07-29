@@ -230,13 +230,17 @@ Cloudflare Dashboard → Workers & Pages → 你的 Worker → Settings → Doma
 
 ## Star History
 
+<!-- star-history:start -->
+<!-- 图表由 .github/workflows/star-history.yml 在 CI 中渲染并提交到独立的 `star-history` 分支；
+     main 分支不存放任何图表产物，文件名固定，由 workflow 定期覆盖刷新。
+     因 api.star-history.com 托管 API 自 2026-06-30 起失效，故改用自托管静态文件。 -->
 <a href="https://www.star-history.com/?repos=AinzRimuru/DockerProxyCF&type=date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=AinzRimuru/DockerProxyCF&type=date&theme=dark">
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=AinzRimuru/DockerProxyCF&type=date">
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=AinzRimuru/DockerProxyCF&type=date">
+   <source media="(prefers-color-scheme: dark)" srcset="https://cdn.jsdelivr.net/gh/AinzRimuru/DockerProxyCF@star-history/assets/star-history/star-history-dark.svg">
+   <img alt="Star History Chart" src="https://cdn.jsdelivr.net/gh/AinzRimuru/DockerProxyCF@star-history/assets/star-history/star-history-light.svg">
  </picture>
 </a>
+<!-- star-history:end -->
 
 ## 鸣谢 Acknowledgements
 
