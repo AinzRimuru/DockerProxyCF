@@ -142,11 +142,14 @@ async function proxyRegistry(request, url, env) {
   }
 
   const headers = buildUpstreamHeaders(request);
+  if (protectedMode) headers.delete('authorization');
   const useAccount = accountConfigured(env) && accountScope !== null;
 
   let res;
   if (useAccount) {
     res = await fetchWithAccountPool(env, upstream, request.method, headers, accountScope);
+  } else if (protectedMode && accountScope !== null) {
+    res = await fetchWithAnonymousToken(upstream, request.method, headers, accountScope);
   } else {
     res = await fetch(upstream, { method: request.method, headers, redirect: 'manual' });
   }
@@ -189,7 +192,7 @@ async function getAvailableAccounts(env) {
 
 /** 用指定账号向 auth.docker.io 换取 scope 的 token（按 账号+scope 缓存）。 */
 async function mintToken(env, account, scope) {
-  const key = `${account.username}|${scope}`;
+  const key = `${account ? account.username : '__anon__'}|${scope}`;
   const now = Date.now();
   const cached = tokenCache.get(key);
   if (cached && cached.expiresAt > now) return cached.token;
@@ -199,7 +202,7 @@ async function mintToken(env, account, scope) {
   if (scope) params.set('scope', scope);
 
   const res = await fetch(`https://${AUTH_HOST}/token?${params.toString()}`, {
-    headers: { Authorization: 'Basic ' + btoa(`${account.username}:${account.password}`) },
+    headers: account ? { Authorization: 'Basic ' + btoa(`${account.username}:${account.password}`) } : {},
   });
   if (!res.ok) throw new Error(`auth.docker.io token request failed: ${res.status}`);
   const data = await res.json();
@@ -210,6 +213,28 @@ async function mintToken(env, account, scope) {
   const expiresIn = Number(data.expires_in) || 300;
   tokenCache.set(key, { token, expiresAt: now + Math.max(60, expiresIn - 60) * 1000 });
   return token;
+}
+
+/** 匿名回源（保护模式未配账号时）：Worker 自取向 auth.docker.io 的匿名 token，401(scope 不符) 同 anonymous 重试一次。 */
+async function fetchWithAnonymousToken(upstream, method, headers, scope) {
+  let token = await mintToken(null, null, scope);
+  headers.set('Authorization', 'Bearer ' + token);
+  let res = await fetch(upstream, { method, headers, redirect: 'manual' });
+
+  if (res.status === 401) {
+    const wwwAuth = res.headers.get('www-authenticate') || '';
+    const m = wwwAuth.match(/scope="([^"]*)"/);
+    const retryScope = m && m[1] ? m[1] : '';
+    if (retryScope && retryScope !== scope) {
+      try {
+        res.body && res.body.cancel && (await res.body.cancel());
+        token = await mintToken(null, null, retryScope);
+        headers.set('Authorization', 'Bearer ' + token);
+        res = await fetch(upstream, { method, headers, redirect: 'manual' });
+      } catch (e) {}
+    }
+  }
+  return res;
 }
 
 /** 用账号池依次尝试：取号→mint→上游；429 则冷却该号并换下一个；401(scope) 同号重试一次。 */
